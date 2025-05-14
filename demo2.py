@@ -57,18 +57,6 @@ class LlamaForSpeechLM(PreTrainedModel):
     config_class = LlamaForSpeechLMConfig
     _tied_weights_keys = ["decoder.lm_head.weight"]
 
-    def get_input_embeddings(self):
-        return self.decoder.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.decoder.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.decoder.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.decoder.lm_head = new_embeddings
-
     def __init__(self, config: LlamaForSpeechLMConfig):
         super().__init__(config)
         self.encoder = WhisperForConditionalGeneration.from_pretrained(config.encoder_id).model.encoder
@@ -82,6 +70,18 @@ class LlamaForSpeechLM(PreTrainedModel):
 
         self.encoder.requires_grad_(False)
         self.decoder.requires_grad_(False)
+
+    def get_input_embeddings(self):
+        return self.decoder.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.decoder.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.decoder.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.decoder.lm_head = new_embeddings
 
     def forward(
         self,
@@ -224,6 +224,7 @@ def train(
     warmup_steps: int = 10,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
+    data_dir="data",
     model_dir="models/llama-for-speech-lm",
 ):
     model = LlamaForSpeechLM(LlamaForSpeechLMConfig(encoder_id=encoder_id, decoder_id=decoder_id)).cuda()
@@ -232,7 +233,7 @@ def train(
     decoder_processor = AutoProcessor.from_pretrained(decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
-    trainset = torchaudio.datasets.LIBRISPEECH(root="data", url="train-clean-100", download=True)
+    trainset = torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True)
     train_loader = torch.utils.data.DataLoader(
         trainset, batch_size, True, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
     )
@@ -292,6 +293,7 @@ def train(
 def eval(
     encoder_id="openai/whisper-small.en",
     decoder_id="meta-llama/Llama-3.2-1B-Instruct",
+    data_dir="data",
     model_dir="models/llama-for-speech-lm",
     max_length: int = 1024,
 ):
@@ -308,7 +310,7 @@ def eval(
 
     """
 
-    testset = torchaudio.datasets.LIBRISPEECH(root="data", url="test-clean", download=True)
+    testset = torchaudio.datasets.LIBRISPEECH(root=data_dir, url="test-clean", download=True)
     test_loader = torch.utils.data.DataLoader(testset)
 
     for item in test_loader:
