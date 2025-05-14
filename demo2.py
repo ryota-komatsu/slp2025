@@ -88,7 +88,7 @@ class LlamaForSpeechLM(PreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.decoder.lm_head = new_embeddings
 
-    def forward(
+    def embed(
         self,
         input_features: torch.FloatTensor,
         input_ids: torch.LongTensor,
@@ -118,14 +118,33 @@ class LlamaForSpeechLM(PreTrainedModel):
             ),
             dim=1,
         )
+        return inputs_embeds, attention_mask
 
-        labels = torch.cat(
-            (
-                torch.full(encoder_hidden_states.shape[:2], -100, dtype=input_ids.dtype, device=input_ids.device),
-                input_ids,
-            ),
-            dim=1,
+    def forward(
+        self,
+        input_features: torch.FloatTensor,
+        input_ids: torch.LongTensor,
+        encoder_attention_mask: torch.LongTensor,
+        decoder_attention_mask: torch.LongTensor,
+    ):
+        """
+        Args:
+            input_features (`torch.FloatTensor` of shape `(batch_size, feature_size, feature_length)`):
+                Log mel spectrogram.
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Token ids.
+            encoder_attention_mask (`torch.LongTensor` of shape `(batch_size, feature_length)`):
+                1: non-mask
+                0: mask
+            decoder_attention_mask (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                1: non-mask
+                0: mask
+        """
+        inputs_embeds, attention_mask = self.embed(
+            input_features, input_ids, encoder_attention_mask, decoder_attention_mask
         )
+
+        labels = F.pad(input_ids, (0, 0, inputs_embeds.shape[1] - input_ids.shape[1], 0), value=-100)
 
         decoder_outputs = self.decoder(inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels)
         return decoder_outputs.loss
@@ -140,28 +159,8 @@ class LlamaForSpeechLM(PreTrainedModel):
         decoder_attention_mask: torch.LongTensor,
         **kwargs,
     ):
-        encoder_outputs = self.encoder(input_features)
-        encoder_hidden_states = encoder_outputs[0]
-
-        lengths = self.encoder._get_feat_extract_output_lengths(encoder_attention_mask.sum(dim=1, keepdim=True))
-        lengths = lengths // self.config.adapter_kernel_size
-        max_len = lengths.max()
-
-        encoder_hidden_states = self.adapter(encoder_hidden_states)
-        encoder_hidden_states = encoder_hidden_states[:, :max_len]
-
-        inputs_embeds = self.decoder.model.embed_tokens(input_ids)
-        inputs_embeds = torch.cat((encoder_hidden_states, inputs_embeds), dim=1)
-
-        attention_mask = torch.cat(
-            (
-                (
-                    torch.arange(encoder_hidden_states.shape[1], device=decoder_attention_mask.device).unsqueeze(0)
-                    < lengths
-                ).long(),
-                decoder_attention_mask,
-            ),
-            dim=1,
+        inputs_embeds, attention_mask = self.embed(
+            input_features, input_ids, encoder_attention_mask, decoder_attention_mask
         )
 
         generated_ids = self.decoder.generate(inputs_embeds=inputs_embeds, attention_mask=attention_mask, **kwargs)
