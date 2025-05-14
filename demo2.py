@@ -2,8 +2,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
+import torch.nn.functional as F
 import torchaudio
 from torch import nn
+from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import (
@@ -25,13 +27,16 @@ class Adapter(nn.Module):
     ):
         super().__init__()
         self.pool = nn.AvgPool1d(kernel_size)
-        self.linear = nn.Linear(encoder_hidden_size, decoder_hidden_size, bias=bias)
+        self.linear1 = nn.Linear(encoder_hidden_size, 2 * decoder_hidden_size, bias=bias)
+        self.linear2 = nn.Linear(2 * decoder_hidden_size, decoder_hidden_size, bias=bias)
 
     def forward(self, hidden_states: torch.FloatTensor) -> torch.FloatTensor:
         hidden_states = hidden_states.permute(0, 2, 1)
         hidden_states = self.pool(hidden_states)
         hidden_states = hidden_states.permute(0, 2, 1)
-        hidden_states = self.linear(hidden_states)
+        hidden_states = self.linear1(hidden_states)
+        hidden_states = F.gelu(hidden_states)
+        hidden_states = self.linear2(hidden_states)
         return hidden_states
 
 
@@ -95,8 +100,10 @@ class LlamaForSpeechLM(PreTrainedModel):
 
         lengths = self.encoder._get_feat_extract_output_lengths(encoder_attention_mask.sum(dim=1, keepdim=True))
         lengths = lengths // self.config.adapter_kernel_size
+        max_len = lengths.max()
 
         encoder_hidden_states = self.adapter(encoder_hidden_states)
+        encoder_hidden_states = encoder_hidden_states[:, :max_len]
 
         inputs_embeds = self.decoder.model.embed_tokens(input_ids)
         inputs_embeds = torch.cat((encoder_hidden_states, inputs_embeds), dim=1)
@@ -138,8 +145,10 @@ class LlamaForSpeechLM(PreTrainedModel):
 
         lengths = self.encoder._get_feat_extract_output_lengths(encoder_attention_mask.sum(dim=1, keepdim=True))
         lengths = lengths // self.config.adapter_kernel_size
+        max_len = lengths.max()
 
         encoder_hidden_states = self.adapter(encoder_hidden_states)
+        encoder_hidden_states = encoder_hidden_states[:, :max_len]
 
         inputs_embeds = self.decoder.model.embed_tokens(input_ids)
         inputs_embeds = torch.cat((encoder_hidden_states, inputs_embeds), dim=1)
@@ -222,6 +231,7 @@ def train(
     lr: float = 1e-3,
     epoch: int = 1,
     warmup_steps: int = 10,
+    init_grad_scale: float = 1e32,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
     data_dir="data",
@@ -233,7 +243,13 @@ def train(
     decoder_processor = AutoProcessor.from_pretrained(decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
-    trainset = torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True)
+    trainset = ConcatDataset(
+        [
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True),
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-360", download=True),
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-other-500", download=True),
+        ]
+    )
     train_loader = torch.utils.data.DataLoader(
         trainset, batch_size, True, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
     )
@@ -249,7 +265,7 @@ def train(
         lr * 0.1,
     )
 
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=init_grad_scale)
     writer = SummaryWriter()
 
     step = 0
