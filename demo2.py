@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import jiwer
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -311,6 +312,8 @@ def eval(
     data_dir="data",
     model_dir="models/llama-for-speech-lm",
     max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 5,
 ):
     model = LlamaForSpeechLM.from_pretrained(model_dir).cuda()
 
@@ -349,8 +352,10 @@ def eval(
             encoder_attention_mask=encoder_inputs.attention_mask,
             decoder_attention_mask=decoder_inputs.attention_mask,
             max_length=max_length,
+            do_sample=do_sample,
+            num_beams=num_beams,
         )
-        generated_txt = decoder_processor.batch_decode(generated_ids)
+        generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
 
 
 if __name__ == "__main__":
