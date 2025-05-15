@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -5,7 +6,7 @@ import jiwer
 import torch
 import torch.nn.functional as F
 import torchaudio
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from torch import nn
 from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
@@ -361,7 +362,7 @@ def eval(
         generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
 
 
-def finetune(
+def generate_data(
     model_id="ryota-komatsu/Llama-for-SpeechLM",
     tts_id="kakao-enterprise/vits-vctk",
 ):
@@ -371,11 +372,48 @@ def finetune(
     decoder_processor = AutoProcessor.from_pretrained(model.config.decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
-    tts_model = AutoModel.from_pretrained(tts_id)
+    tts_model = AutoModel.from_pretrained(tts_id).cuda()
     tts_tokenizer = AutoTokenizer.from_pretrained(tts_id)
 
+    def filter_by_input(example):
+        pattern = "[A-Za-z,.'!? ]+"
+        noinput_pattern = r"no\s*input\s*(required)?\.?"
+        return (
+            example["input"] != ""
+            and example["input"] != "Mon cheval est blanc"
+            and example["input"] != "The bakery that I visited yesterday had freshly made croissants."
+            and example["input"] != "Croissants are French pastries. The sky is blue."
+            and not re.match(noinput_pattern, example["input"], re.IGNORECASE)
+            and re.fullmatch(pattern, example["input"]) is not None
+        )
+
+    @torch.inference_mode()
+    def add_audio(example):
+        inputs = tts_tokenizer(example["input"], return_tensors="pt").to("cuda")
+        output = tts_model(**inputs).waveform
+        output = torchaudio.functional.resample(output, tts_model.config.sampling_rate, 16000)
+        output = output.squeeze(0).cpu().numpy()
+        return {"audio": {"array": output, "sampling_rate": 16000}}
+
     dataset = load_dataset("tatsu-lab/alpaca", split="train")
+    dataset = dataset.filter(filter_by_input)
+    dataset = dataset.map(add_audio)
+    dataset.push_to_hub("spoken-alpaca")
+
+
+def finetune(
+    model_id="ryota-komatsu/Llama-for-SpeechLM",
+    dataset_id="ryota-komatsu/spoken-alpaca",
+):
+    model = LlamaForSpeechLM.from_pretrained(model_id).cuda()
+
+    encoder_processor = AutoProcessor.from_pretrained(model.config.encoder_id)
+    decoder_processor = AutoProcessor.from_pretrained(model.config.decoder_id)
+    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
+
+    dataset = load_dataset(dataset_id, split="train")
+    dataset = dataset.cast_column("audio", Audio())
 
 
 if __name__ == "__main__":
-    train()
+    finetune()
