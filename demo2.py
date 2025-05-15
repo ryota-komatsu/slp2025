@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import jiwer
 import torch
@@ -149,7 +149,7 @@ class LlamaForSpeechLM(PreTrainedModel):
             input_features, input_ids, encoder_attention_mask, decoder_attention_mask
         )
 
-        labels = F.pad(input_ids, (0, 0, inputs_embeds.shape[1] - input_ids.shape[1], 0), value=-100)
+        labels = F.pad(input_ids, (inputs_embeds.shape[1] - input_ids.shape[1], 0), value=-100)
 
         decoder_outputs = self.decoder(inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels)
         return decoder_outputs.loss
@@ -189,81 +189,23 @@ def get_lr_schedule(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_schedule)
 
 
-def get_collate_fn(encoder_processor, decoder_processor):
-    prompt = """
-    <|start_header_id|>user<|end_header_id|>
-
-    Transcribe the audio clip into English.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-    {}<|eot_id|>
-    """
-
-    def collate_fn(batch: List[Tuple[torch.Tensor, int, str, int, int, int]]) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            batch: List of (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
-        """
-
-        encoder_inputs = encoder_processor(
-            [item[0].squeeze(0).numpy() for item in batch],
-            return_tensors="pt",
-            return_attention_mask=True,
-            sampling_rate=16000,
-            device="cuda",
-        ).to("cuda")
-
-        decoder_inputs = decoder_processor(
-            [prompt.format(item[2].lower()) for item in batch],
-            padding=True,
-            return_tensors="pt",
-        ).to("cuda")
-
-        return {
-            "input_features": encoder_inputs.input_features,
-            "input_ids": decoder_inputs.input_ids,
-            "encoder_attention_mask": encoder_inputs.attention_mask,
-            "decoder_attention_mask": decoder_inputs.attention_mask,
-        }
-
-    return collate_fn
-
-
-def train(
-    encoder_id="openai/whisper-small.en",
-    decoder_id="meta-llama/Llama-3.2-1B-Instruct",
-    batch_size: int = 4,
+def _train(
+    model: LlamaForSpeechLM,
+    loader: torch.utils.data.DataLoader,
     lr: float = 1e-3,
     epoch: int = 1,
     warmup_steps: int = 10,
     init_grad_scale: float = 1e32,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
-    data_dir="data",
     model_dir="models/Llama-for-SpeechLM",
 ):
-    model = LlamaForSpeechLM(LlamaForSpeechLMConfig(encoder_id=encoder_id, decoder_id=decoder_id)).cuda()
-
-    encoder_processor = AutoProcessor.from_pretrained(encoder_id)
-    decoder_processor = AutoProcessor.from_pretrained(decoder_id)
-    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
-
-    trainset = ConcatDataset(
-        [
-            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True),
-            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-360", download=True),
-            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-other-500", download=True),
-        ]
-    )
-    train_loader = torch.utils.data.DataLoader(
-        trainset, batch_size, True, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
-    )
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     # learning rate scheduler
     lr_scheduler = get_lr_schedule(
         optimizer,
-        len(train_loader) // grad_accumulation * epoch,
+        len(loader) // grad_accumulation * epoch,
         warmup_steps,
         lr,
         lr * 0.1,
@@ -277,7 +219,7 @@ def train(
     for epoch in range(1, epoch + 1):
         model.train()
 
-        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"epoch {epoch}")):
+        for batch_idx, batch in enumerate(tqdm(loader, desc=f"epoch {epoch}")):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 loss = model(**batch)
                 loss = loss / grad_accumulation
@@ -308,6 +250,88 @@ def train(
 
         Path(model_dir).parent.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(model_dir)
+
+
+def train(
+    encoder_id="openai/whisper-small.en",
+    decoder_id="meta-llama/Llama-3.2-1B-Instruct",
+    batch_size: int = 4,
+    lr: float = 1e-3,
+    epoch: int = 1,
+    warmup_steps: int = 10,
+    init_grad_scale: float = 1e32,
+    clip_grad_norm: float = 1.0,
+    grad_accumulation: int = 128,
+    data_dir="data",
+    model_dir="models/Llama-for-SpeechLM",
+):
+    model = LlamaForSpeechLM(LlamaForSpeechLMConfig(encoder_id=encoder_id, decoder_id=decoder_id)).cuda()
+
+    encoder_processor = AutoProcessor.from_pretrained(encoder_id)
+    decoder_processor = AutoProcessor.from_pretrained(decoder_id)
+    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
+
+    dataset = ConcatDataset(
+        [
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True),
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-360", download=True),
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-other-500", download=True),
+        ]
+    )
+
+    def get_collate_fn(encoder_processor, decoder_processor):
+        prompt = """
+        <|start_header_id|>user<|end_header_id|>
+
+        Transcribe the audio clip into English.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+        {}<|eot_id|>
+        """
+
+        def collate_fn(batch: List[Tuple[torch.Tensor, int, str, int, int, int]]) -> Dict[str, torch.Tensor]:
+            """
+            Args:
+                batch: List of (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
+            """
+
+            encoder_inputs = encoder_processor(
+                [item[0].squeeze(0).numpy() for item in batch],
+                return_tensors="pt",
+                return_attention_mask=True,
+                sampling_rate=16000,
+                device="cuda",
+            ).to("cuda")
+
+            decoder_inputs = decoder_processor(
+                [prompt.format(item[2].lower()) for item in batch],
+                padding=True,
+                return_tensors="pt",
+            ).to("cuda")
+
+            return {
+                "input_features": encoder_inputs.input_features,
+                "input_ids": decoder_inputs.input_ids,
+                "encoder_attention_mask": encoder_inputs.attention_mask,
+                "decoder_attention_mask": decoder_inputs.attention_mask,
+            }
+
+        return collate_fn
+
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size, True, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
+    )
+
+    _train(
+        model,
+        loader,
+        lr,
+        epoch,
+        warmup_steps,
+        init_grad_scale,
+        clip_grad_norm,
+        grad_accumulation,
+        model_dir,
+    )
 
 
 def eval(
@@ -404,6 +428,14 @@ def generate_data(
 def finetune(
     model_id="ryota-komatsu/Llama-for-SpeechLM",
     dataset_id="ryota-komatsu/spoken-alpaca",
+    model_dir="models/Llama-for-SpeechLM-Instruct",
+    batch_size: int = 4,
+    lr: float = 1e-3,
+    epoch: int = 5,
+    warmup_steps: int = 10,
+    init_grad_scale: float = 1e32,
+    clip_grad_norm: float = 1.0,
+    grad_accumulation: int = 128,
 ):
     model = LlamaForSpeechLM.from_pretrained(model_id).cuda()
 
@@ -411,8 +443,85 @@ def finetune(
     decoder_processor = AutoProcessor.from_pretrained(model.config.decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
+    def filter_by_length(example):
+        return (
+            len(example["audio"]["array"]) < 16000 * 30
+            and len(example["instruction"]) < 102
+            and len(example["output"]) < 838
+        )
+
     dataset = load_dataset(dataset_id, split="train")
     dataset = dataset.cast_column("audio", Audio())
+    dataset = dataset.with_format("torch")
+    dataset = dataset.filter(filter_by_length)
+
+    def get_collate_fn(encoder_processor, decoder_processor):
+        prompt = """
+        <|start_header_id|>user<|end_header_id|>
+
+        Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
+
+        ### Instruction:
+        {}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+        ### Transcript:
+        {}
+
+        ### Response:
+        {}<|eot_id|>
+        """
+
+        def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+            """
+            Args:
+                batch: List of the following example:
+                    {
+                        "instruction": "",
+                        "input": "",
+                        "output": "",
+                        "text": "",
+                        "audio": {"path": None, "array": tensor([...]), "sampling_rate": tensor(16000)},
+                    }
+            """
+
+            encoder_inputs = encoder_processor(
+                [item["audio"]["array"].numpy() for item in batch],
+                return_tensors="pt",
+                return_attention_mask=True,
+                sampling_rate=16000,
+                device="cuda",
+            ).to("cuda")
+
+            decoder_inputs = decoder_processor(
+                [prompt.format(item["instruction"], item["input"], item["output"]) for item in batch],
+                padding=True,
+                return_tensors="pt",
+            ).to("cuda")
+
+            return {
+                "input_features": encoder_inputs.input_features,
+                "input_ids": decoder_inputs.input_ids,
+                "encoder_attention_mask": encoder_inputs.attention_mask,
+                "decoder_attention_mask": decoder_inputs.attention_mask,
+            }
+
+        return collate_fn
+
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size, True, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
+    )
+
+    _train(
+        model,
+        loader,
+        lr,
+        epoch,
+        warmup_steps,
+        init_grad_scale,
+        clip_grad_norm,
+        grad_accumulation,
+        model_dir,
+    )
 
 
 if __name__ == "__main__":
