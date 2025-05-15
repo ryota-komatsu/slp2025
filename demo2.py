@@ -334,58 +334,6 @@ def train(
     )
 
 
-def eval(
-    encoder_id="openai/whisper-small.en",
-    decoder_id="meta-llama/Llama-3.2-1B-Instruct",
-    data_dir="data",
-    model_dir="models/Llama-for-SpeechLM",
-    max_length: int = 1024,
-    do_sample: bool = False,
-    num_beams: int = 5,
-):
-    model = LlamaForSpeechLM.from_pretrained(model_dir).cuda()
-
-    encoder_processor = AutoProcessor.from_pretrained(encoder_id)
-    decoder_processor = AutoProcessor.from_pretrained(decoder_id)
-    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
-
-    prompt = """
-    <|start_header_id|>user<|end_header_id|>
-
-    Transcribe the audio clip into English.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-    """
-
-    testset = torchaudio.datasets.LIBRISPEECH(root=data_dir, url="test-clean", download=True)
-    test_loader = torch.utils.data.DataLoader(testset)
-
-    for item in test_loader:
-        encoder_inputs = encoder_processor(
-            item[0].squeeze(0).numpy(),
-            return_tensors="pt",
-            return_attention_mask=True,
-            sampling_rate=16000,
-            device="cuda",
-        ).to("cuda")
-
-        decoder_inputs = decoder_processor(
-            prompt,
-            padding=True,
-            return_tensors="pt",
-        ).to("cuda")
-
-        generated_ids = model.generate(
-            encoder_inputs.input_features,
-            decoder_inputs.input_ids,
-            encoder_attention_mask=encoder_inputs.attention_mask,
-            decoder_attention_mask=decoder_inputs.attention_mask,
-            max_length=max_length,
-            do_sample=do_sample,
-            num_beams=num_beams,
-        )
-        generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
-
-
 def generate_data(
     model_id="ryota-komatsu/Llama-for-SpeechLM",
     tts_id="kakao-enterprise/vits-vctk",
@@ -524,5 +472,68 @@ def finetune(
     )
 
 
+def eval(
+    encoder_id="openai/whisper-small.en",
+    decoder_id="meta-llama/Llama-3.2-1B-Instruct",
+    dataset_id="ryota-komatsu/spoken-alpaca",
+    model_dir="models/Llama-for-SpeechLM-Instruct",
+    max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 5,
+):
+    model = LlamaForSpeechLM.from_pretrained(model_dir).cuda()
+
+    encoder_processor = AutoProcessor.from_pretrained(encoder_id)
+    decoder_processor = AutoProcessor.from_pretrained(decoder_id)
+    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
+
+    prompt = """
+    <|start_header_id|>user<|end_header_id|>
+
+    Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
+
+    ### Instruction:
+    {}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+    """
+
+    def filter_by_length(example):
+        return len(example["audio"]["array"]) < 16000 * 30 and (
+            not len(example["instruction"]) < 102 or not len(example["output"]) < 838
+        )
+
+    dataset = load_dataset(dataset_id, split="train")
+    dataset = dataset.with_format("torch")
+    dataset = dataset.filter(filter_by_length)
+
+    loader = torch.utils.data.DataLoader(dataset, shuffle=True)
+
+    for item in loader:
+        encoder_inputs = encoder_processor(
+            item["audio"]["array"].numpy(),
+            return_tensors="pt",
+            return_attention_mask=True,
+            sampling_rate=16000,
+            device="cuda",
+        ).to("cuda")
+
+        decoder_inputs = decoder_processor(
+            prompt.format(item["instruction"][0]),
+            padding=True,
+            return_tensors="pt",
+        ).to("cuda")
+
+        generated_ids = model.generate(
+            encoder_inputs.input_features,
+            decoder_inputs.input_ids,
+            encoder_attention_mask=encoder_inputs.attention_mask,
+            decoder_attention_mask=decoder_inputs.attention_mask,
+            max_length=max_length,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+        generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+
 if __name__ == "__main__":
-    finetune()
+    eval()
