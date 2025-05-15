@@ -5,13 +5,16 @@ import jiwer
 import torch
 import torch.nn.functional as F
 import torchaudio
+from datasets import load_dataset
 from torch import nn
 from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import (
+    AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
+    AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
     WhisperForConditionalGeneration,
@@ -235,7 +238,7 @@ def train(
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
     data_dir="data",
-    model_dir="models/llama-for-speech-lm",
+    model_dir="models/Llama-for-SpeechLM",
 ):
     model = LlamaForSpeechLM(LlamaForSpeechLMConfig(encoder_id=encoder_id, decoder_id=decoder_id)).cuda()
 
@@ -310,7 +313,7 @@ def eval(
     encoder_id="openai/whisper-small.en",
     decoder_id="meta-llama/Llama-3.2-1B-Instruct",
     data_dir="data",
-    model_dir="models/llama-for-speech-lm",
+    model_dir="models/Llama-for-SpeechLM",
     max_length: int = 1024,
     do_sample: bool = False,
     num_beams: int = 5,
@@ -356,6 +359,22 @@ def eval(
             num_beams=num_beams,
         )
         generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+
+def finetune(
+    model_id="ryota-komatsu/Llama-for-SpeechLM",
+    tts_id="kakao-enterprise/vits-vctk",
+):
+    model = LlamaForSpeechLM.from_pretrained(model_id).cuda()
+
+    encoder_processor = AutoProcessor.from_pretrained(model.config.encoder_id)
+    decoder_processor = AutoProcessor.from_pretrained(model.config.decoder_id)
+    decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
+
+    tts_model = AutoModel.from_pretrained(tts_id)
+    tts_tokenizer = AutoTokenizer.from_pretrained(tts_id)
+
+    dataset = load_dataset("tatsu-lab/alpaca", split="train")
 
 
 if __name__ == "__main__":
