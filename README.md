@@ -15,3 +15,9 @@
 ### Phi-4-Multimodalで音声翻訳
 
 [![colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ryota-komatsu/slp2025/blob/main/demo1.ipynb)
+
+### Llama 3.2とWhisper encoderをadapterで接続してzero-shot instruction following
+
+[![colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ryota-komatsu/slp2025/blob/main/demo2.ipynb)
+[![model](https://img.shields.io/badge/%F0%9F%A4%97-Models-blue)](https://huggingface.co/ryota-komatsu/Llama-for-SpeechLM-Instruct)
+[![dataset](https://img.shields.io/badge/%F0%9F%A4%97-Datasets-blue)](https://huggingface.co/datasets/ryota-komatsu/spoken-alpaca)
