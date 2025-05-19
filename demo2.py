@@ -1,8 +1,9 @@
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import jiwer
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -172,6 +173,38 @@ class LlamaForSpeechLM(PreTrainedModel):
         return generated_ids
 
 
+class Clotho(torch.utils.data.Dataset):
+    def __init__(self, root="data", split: str = "development", caption_idx: int = 1):
+        """
+        Args:
+            split: development | validation | evaluation
+        """
+        self.audio_dir = os.path.join(root, "clotho", split)
+        caption_path = os.path.join(root, f"clotho/clotho_captions_{split}.csv")
+
+        self.captions = pd.read_csv(caption_path, encoding="ISO-8859-1")
+        self.caption_idx = caption_idx
+
+    def __len__(self):
+        return len(self.captions)
+
+    def __getitem__(self, n: int) -> Tuple[torch.FloatTensor, int, str]:
+        """
+        Returns:
+            audio: 15 to 30 seconds duration
+            caption: 8 to 20 words length
+        """
+        item = self.captions.iloc[n]  # file_name,caption_1,caption_2,caption_3,caption_4,caption_5
+
+        audio_path = os.path.join(self.audio_dir, item["file_name"])
+        audio, sr = torchaudio.load(audio_path)
+        audio = torchaudio.functional.resample(audio, sr, 16000)
+
+        caption = item[f"caption_{self.caption_idx}"]
+
+        return audio, 16000, caption
+
+
 def get_lr_schedule(
     optimizer,
     total_steps: int,
@@ -276,17 +309,20 @@ def train(
             torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-100", download=True),
             torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-clean-360", download=True),
             torchaudio.datasets.LIBRISPEECH(root=data_dir, url="train-other-500", download=True),
+            Clotho(root=data_dir, caption_idx=1),
+            Clotho(root=data_dir, caption_idx=2),
+            Clotho(root=data_dir, caption_idx=3),
+            Clotho(root=data_dir, caption_idx=4),
+            Clotho(root=data_dir, caption_idx=5),
         ]
     )
 
     def get_collate_fn(encoder_processor, decoder_processor):
-        prompt = """
-        <|start_header_id|>user<|end_header_id|>
+        prompt = """<|start_header_id|>user<|end_header_id|>
 
         Transcribe the audio clip into English.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
-        {}<|eot_id|>
-        """
+        {}<|eot_id|>"""
 
         def collate_fn(batch: List[Tuple[torch.Tensor, int, str, int, int, int]]) -> Dict[str, torch.Tensor]:
             """
@@ -391,7 +427,7 @@ def finetune(
     decoder_processor = AutoProcessor.from_pretrained(model.config.decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
-    def filter_by_length(example):
+    def is_train_example(example):
         return (
             len(example["audio"]["array"]) < 16000 * 30
             and len(example["instruction"]) < 102
@@ -399,13 +435,11 @@ def finetune(
         )
 
     dataset = load_dataset(dataset_id, split="train")
-    dataset = dataset.cast_column("audio", Audio())
     dataset = dataset.with_format("torch")
-    dataset = dataset.filter(filter_by_length)
+    dataset = dataset.filter(is_train_example)
 
     def get_collate_fn(encoder_processor, decoder_processor):
-        prompt = """
-        <|start_header_id|>user<|end_header_id|>
+        prompt = """<|start_header_id|>user<|end_header_id|>
 
         Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
 
@@ -416,8 +450,7 @@ def finetune(
         {}
 
         ### Response:
-        {}<|eot_id|>
-        """
+        {}<|eot_id|>"""
 
         def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
             """
@@ -487,8 +520,7 @@ def eval(
     decoder_processor = AutoProcessor.from_pretrained(decoder_id)
     decoder_processor.pad_token = decoder_processor.pad_token or decoder_processor.eos_token
 
-    prompt = """
-    <|start_header_id|>user<|end_header_id|>
+    prompt = """<|start_header_id|>user<|end_header_id|>
 
     Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
 
@@ -497,14 +529,16 @@ def eval(
 
     """
 
-    def filter_by_length(example):
-        return len(example["audio"]["array"]) < 16000 * 30 and (
-            not len(example["instruction"]) < 102 or not len(example["output"]) < 838
+    def is_test_example(example):
+        return (
+            len(example["audio"]["array"]) < 16000 * 30
+            and 102 <= len(example["instruction"])
+            and len(example["output"]) < 838
         )
 
     dataset = load_dataset(dataset_id, split="train")
     dataset = dataset.with_format("torch")
-    dataset = dataset.filter(filter_by_length)
+    dataset = dataset.filter(is_test_example)
 
     loader = torch.utils.data.DataLoader(dataset, shuffle=True)
 
