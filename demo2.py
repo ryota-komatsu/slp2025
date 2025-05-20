@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import jiwer
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -201,8 +202,9 @@ class Clotho(torch.utils.data.Dataset):
         audio = torchaudio.functional.resample(audio, sr, 16000)
 
         caption = item[f"caption_{self.caption_idx}"]
+        captions = [item[f"caption_{caption_idx}"] for caption_idx in range(1, 6)]
 
-        return audio, 16000, caption
+        return audio, 16000, caption, captions
 
 
 def get_lr_schedule(
@@ -285,6 +287,45 @@ def _train(
         model.save_pretrained(model_dir)
 
 
+def validate(
+    model,
+    encoder_processor,
+    decoder_processor,
+    batch_size: int = 4,
+    max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 5,
+    data_dir="data",
+):
+    dataset = ConcatDataset(
+        [
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="dev-clean", download=True),
+            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="dev-other", download=True),
+        ]
+    )
+    loader = torch.utils.data.DataLoader(dataset, batch_size, True)
+
+    hyps = []
+    refs = []
+
+    for batch in loader:
+        generated_ids = model.generate(
+            batch["input_features"],
+            batch["input_ids"],
+            batch["encoder_attention_mask"],
+            batch["decoder_attention_mask"],
+            max_length=max_length,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+        generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
+        hyps += [re.search(r"\s*(.*?)\s*<\|eot_id\|>", hyp, re.DOTALL).group(1).strip() for hyp in generated_txt]
+
+        refs += batch["text"]
+
+    wer = jiwer.wer(refs, hyps) * 100
+
+
 def train(
     encoder_id="openai/whisper-small.en",
     decoder_id="meta-llama/Llama-3.2-1B-Instruct",
@@ -331,13 +372,13 @@ def train(
         {}<|eot_id|>"""
 
         def collate_fn(
-            batch: List[Tuple[torch.Tensor, int, str, int, int, int] | Tuple[torch.Tensor, int, str]],
+            batch: List[Tuple[torch.Tensor, int, str, int, int, int] | Tuple[torch.Tensor, int, str, List[str]]],
         ) -> Dict[str, torch.Tensor]:
             """
             Args:
                 batch: List of tuples.
                     ASR: (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
-                    AAC: (waveform, sample rate, transcript)
+                    AAC: (waveform, sample rate, caption, captions)
             """
 
             encoder_inputs = encoder_processor(

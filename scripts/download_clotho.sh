@@ -7,5 +7,10 @@ wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_audio_de
 wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_captions_development.csv
 wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_metadata_development.csv
 
+wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_audio_validation.7z
+wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_captions_validation.csv
+wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_metadata_validation.csv
+
 cd ${dataset_root}
 7z x https://zenodo.org/records/4783391/files/clotho_audio_development.7z
+7z x https://zenodo.org/records/4783391/files/clotho_audio_validation.7z
