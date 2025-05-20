@@ -12,5 +12,5 @@ wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_captions
 wget -P ${dataset_root} https://zenodo.org/records/4783391/files/clotho_metadata_validation.csv
 
 cd ${dataset_root}
-7z x https://zenodo.org/records/4783391/files/clotho_audio_development.7z
-7z x https://zenodo.org/records/4783391/files/clotho_audio_validation.7z
+7z x clotho_audio_development.7z
+7z x clotho_audio_validation.7z

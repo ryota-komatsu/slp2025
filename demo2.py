@@ -3,12 +3,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import jiwer
+import evaluate
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import torchaudio
-from datasets import Audio, load_dataset
+from datasets import load_dataset
 from torch import nn
 from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
@@ -201,8 +201,8 @@ class Clotho(torch.utils.data.Dataset):
         audio, sr = torchaudio.load(audio_path)
         audio = torchaudio.functional.resample(audio, sr, 16000)
 
-        caption = item[f"caption_{self.caption_idx}"]
-        captions = [item[f"caption_{caption_idx}"] for caption_idx in range(1, 6)]
+        caption = item[f"caption_{self.caption_idx}"].strip('"')
+        captions = [item[f"caption_{caption_idx}"].strip('"') for caption_idx in range(1, 6)]
 
         return audio, 16000, caption, captions
 
@@ -226,13 +226,21 @@ def get_lr_schedule(
 
 def _train(
     model: LlamaForSpeechLM,
+    encoder_processor,
+    decoder_processor,
     loader: torch.utils.data.DataLoader,
+    batch_size: int = 4,
     lr: float = 1e-3,
     epoch: int = 1,
     warmup_steps: int = 10,
     init_grad_scale: float = 1e32,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
+    # validation
+    max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 1,
+    data_dir="data",
     model_dir="models/Llama-for-SpeechLM",
 ):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -253,6 +261,8 @@ def _train(
 
     for epoch in range(1, epoch + 1):
         model.train()
+        model.encoder.eval()
+        model.decoder.eval()
 
         for batch_idx, batch in enumerate(tqdm(loader, desc=f"epoch {epoch}")):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -283,6 +293,19 @@ def _train(
                 writer.add_scalar("train/scale", scale, step)
                 writer.add_scalar("train/grad_norm", grad_norm.item(), step)
 
+        validate(
+            model,
+            encoder_processor,
+            decoder_processor,
+            writer,
+            step,
+            batch_size,
+            max_length,
+            do_sample,
+            num_beams,
+            data_dir,
+        )
+
         Path(model_dir).parent.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(model_dir)
 
@@ -291,39 +314,108 @@ def validate(
     model,
     encoder_processor,
     decoder_processor,
+    writer,
+    step: int,
     batch_size: int = 4,
     max_length: int = 1024,
     do_sample: bool = False,
-    num_beams: int = 5,
+    num_beams: int = 1,
     data_dir="data",
 ):
-    dataset = ConcatDataset(
-        [
-            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="dev-clean", download=True),
-            torchaudio.datasets.LIBRISPEECH(root=data_dir, url="dev-other", download=True),
+    def get_collate_fn(encoder_processor, decoder_processor):
+        prompt = """<|start_header_id|>user<|end_header_id|>
+
+        {} the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+        """
+
+        def collate_fn(
+            batch: List[Tuple[torch.Tensor, int, str, int, int, int] | Tuple[torch.Tensor, int, str, List[str]]],
+        ) -> Dict[str, torch.Tensor]:
+            """
+            Args:
+                batch: List of tuples.
+                    ASR: (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
+                    AAC: (waveform, sample rate, caption, captions)
+            """
+
+            encoder_inputs = encoder_processor(
+                [item[0].squeeze(0).numpy() for item in batch],
+                return_tensors="pt",
+                return_attention_mask=True,
+                sampling_rate=16000,
+                device="cuda",
+            ).to("cuda")
+
+            decoder_inputs = decoder_processor(
+                [prompt.format("Transcribe") if len(item) == 6 else prompt.format("Describe") for item in batch],
+                padding=True,
+                return_tensors="pt",
+            ).to("cuda")
+
+            refs = [item[2] if len(item) == 6 else item[3] for item in batch]
+
+            return {
+                "input_features": encoder_inputs.input_features,
+                "input_ids": decoder_inputs.input_ids,
+                "encoder_attention_mask": encoder_inputs.attention_mask,
+                "decoder_attention_mask": decoder_inputs.attention_mask,
+                "refs": refs,
+            }
+
+        return collate_fn
+
+    def _validate(model, encoder_processor, decoder_processor, loader):
+        hyps = []
+        refs = []
+
+        for batch in loader:
+            generated_ids = model.generate(
+                batch["input_features"],
+                batch["input_ids"],
+                batch["encoder_attention_mask"],
+                batch["decoder_attention_mask"],
+                max_length=max_length,
+                do_sample=do_sample,
+                num_beams=num_beams,
+            )
+            hyps += decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
+            refs += batch["refs"]
+
+        hyps = [encoder_processor.tokenizer.normalize(hyp) for hyp in hyps]
+        refs = [
+            encoder_processor.tokenizer.normalize(ref)
+            if isinstance(ref, str)
+            else [encoder_processor.tokenizer.normalize(ref_i) for ref_i in ref]
+            for ref in refs
         ]
+
+        return hyps, refs
+
+    model.eval()
+
+    asr_dataset = torchaudio.datasets.LIBRISPEECH(root=data_dir, url="dev-clean", download=True)
+    asr_loader = torch.utils.data.DataLoader(
+        asr_dataset, batch_size, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
     )
-    loader = torch.utils.data.DataLoader(dataset, batch_size, True)
 
-    hyps = []
-    refs = []
+    aac_dataset = Clotho(root=data_dir, split="validation")
+    aac_loader = torch.utils.data.DataLoader(
+        aac_dataset, batch_size, collate_fn=get_collate_fn(encoder_processor, decoder_processor)
+    )
 
-    for batch in loader:
-        generated_ids = model.generate(
-            batch["input_features"],
-            batch["input_ids"],
-            batch["encoder_attention_mask"],
-            batch["decoder_attention_mask"],
-            max_length=max_length,
-            do_sample=do_sample,
-            num_beams=num_beams,
-        )
-        generated_txt = decoder_processor.batch_decode(generated_ids, skip_special_tokens=True)
-        hyps += [re.search(r"\s*(.*?)\s*<\|eot_id\|>", hyp, re.DOTALL).group(1).strip() for hyp in generated_txt]
+    asr_hyps, asr_refs = _validate(model, encoder_processor, decoder_processor, asr_loader)
+    aac_hyps, aac_refs = _validate(model, encoder_processor, decoder_processor, aac_loader)
 
-        refs += batch["text"]
+    wer_evaluator = evaluate.load("wer")
+    bleu_evaluator = evaluate.load("bleu")
 
-    wer = jiwer.wer(refs, hyps) * 100
+    wer = wer_evaluator.compute(predictions=asr_hyps, references=asr_refs) * 100
+    bleu = bleu_evaluator.compute(predictions=aac_hyps, references=aac_refs)["bleu"]
+
+    # tensorboard log
+    writer.add_scalar("dev/wer", wer, step)
+    writer.add_scalar("dev/bleu", bleu, step)
 
 
 def train(
@@ -331,11 +423,15 @@ def train(
     decoder_id="meta-llama/Llama-3.2-1B-Instruct",
     batch_size: int = 4,
     lr: float = 1e-3,
-    epoch: int = 1,
+    epoch: int = 5,
     warmup_steps: int = 10,
     init_grad_scale: float = 1e32,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
+    # validation
+    max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 1,
     data_dir="data",
     model_dir="models/Llama-for-SpeechLM",
 ):
@@ -359,15 +455,9 @@ def train(
     )
 
     def get_collate_fn(encoder_processor, decoder_processor):
-        asr_prompt = """<|start_header_id|>user<|end_header_id|>
+        prompt = """<|start_header_id|>user<|end_header_id|>
 
-        Transcribe the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-        {}<|eot_id|>"""
-
-        aac_prompt = """<|start_header_id|>user<|end_header_id|>
-
-        Describe the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        {} the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
         {}<|eot_id|>"""
 
@@ -391,7 +481,9 @@ def train(
 
             decoder_inputs = decoder_processor(
                 [
-                    asr_prompt.format(item[2].lower()) if len(item) == 6 else aac_prompt.format(item[2].lower())
+                    prompt.format("Transcribe", item[2].lower())
+                    if len(item) == 6
+                    else prompt.format("Describe", item[2])
                     for item in batch
                 ],
                 padding=True,
@@ -413,13 +505,20 @@ def train(
 
     _train(
         model,
+        encoder_processor,
+        decoder_processor,
         loader,
+        batch_size,
         lr,
         epoch,
         warmup_steps,
         init_grad_scale,
         clip_grad_norm,
         grad_accumulation,
+        max_length,
+        do_sample,
+        num_beams,
+        data_dir,
         model_dir,
     )
 
@@ -466,6 +565,7 @@ def generate_data(
 def finetune(
     model_id="ryota-komatsu/Llama-for-SpeechLM",
     dataset_id="ryota-komatsu/spoken-alpaca",
+    data_dir="data",
     model_dir="models/Llama-for-SpeechLM-Instruct",
     batch_size: int = 4,
     lr: float = 1e-3,
@@ -474,6 +574,10 @@ def finetune(
     init_grad_scale: float = 1e32,
     clip_grad_norm: float = 1.0,
     grad_accumulation: int = 128,
+    # validation
+    max_length: int = 1024,
+    do_sample: bool = False,
+    num_beams: int = 1,
 ):
     model = LlamaForSpeechLM.from_pretrained(model_id).cuda()
 
@@ -495,7 +599,7 @@ def finetune(
     def get_collate_fn(encoder_processor, decoder_processor):
         prompt = """<|start_header_id|>user<|end_header_id|>
 
-        Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
+        Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio, and then write a response that appropriately completes the request.
 
         ### Instruction:
         {}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
@@ -548,13 +652,20 @@ def finetune(
 
     _train(
         model,
+        encoder_processor,
+        decoder_processor,
         loader,
+        batch_size,
         lr,
         epoch,
         warmup_steps,
         init_grad_scale,
         clip_grad_norm,
         grad_accumulation,
+        max_length,
+        do_sample,
+        num_beams,
+        data_dir,
         model_dir,
     )
 
