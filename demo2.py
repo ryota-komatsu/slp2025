@@ -318,16 +318,26 @@ def train(
     )
 
     def get_collate_fn(encoder_processor, decoder_processor):
-        prompt = """<|start_header_id|>user<|end_header_id|>
+        asr_prompt = """<|start_header_id|>user<|end_header_id|>
 
-        Transcribe the audio clip into English.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        Transcribe the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
         {}<|eot_id|>"""
 
-        def collate_fn(batch: List[Tuple[torch.Tensor, int, str, int, int, int]]) -> Dict[str, torch.Tensor]:
+        aac_prompt = """<|start_header_id|>user<|end_header_id|>
+
+        Describe the audio.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+        {}<|eot_id|>"""
+
+        def collate_fn(
+            batch: List[Tuple[torch.Tensor, int, str, int, int, int] | Tuple[torch.Tensor, int, str]],
+        ) -> Dict[str, torch.Tensor]:
             """
             Args:
-                batch: List of (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
+                batch: List of tuples.
+                    ASR: (waveform, sample rate, transcript, speaker ID, chapter ID, utterance ID)
+                    AAC: (waveform, sample rate, transcript)
             """
 
             encoder_inputs = encoder_processor(
@@ -339,7 +349,10 @@ def train(
             ).to("cuda")
 
             decoder_inputs = decoder_processor(
-                [prompt.format(item[2].lower()) for item in batch],
+                [
+                    asr_prompt.format(item[2].lower()) if len(item) == 6 else aac_prompt.format(item[2].lower())
+                    for item in batch
+                ],
                 padding=True,
                 return_tensors="pt",
             ).to("cuda")
