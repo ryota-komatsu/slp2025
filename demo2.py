@@ -687,7 +687,7 @@ def eval(
 
     prompt = """<|start_header_id|>user<|end_header_id|>
 
-    Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio clip into English, and then write a response that appropriately completes the request.
+    Below is an instruction that describes a task, paired with an audio input that provides further context. Transcribe the audio, and then write a response that appropriately completes the request.
 
     ### Instruction:
     {}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
