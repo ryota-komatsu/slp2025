@@ -189,7 +189,7 @@ class Clotho(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.captions)
 
-    def __getitem__(self, n: int) -> Tuple[torch.FloatTensor, int, str]:
+    def __getitem__(self, n: int) -> Tuple[torch.FloatTensor, int, str, List[str]]:
         """
         Returns:
             audio: 15 to 30 seconds duration
