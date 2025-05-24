@@ -10,6 +10,9 @@
 会場: 早稲田大学 西早稲田キャンパス \
 詳細: [研究会Webページ](https://www.ipsj.or.jp/kenkyukai/event/mus143slp156.html)
 
+## 質問
+事前に[Google Forms](https://docs.google.com/forms/d/1pVKss5P4kh5-NQc-qp5K_dDA5_sxe0OUBAH18Nvzzew/edit?hl=ja)にいただいた質問には当日回答させていただきます．また，時間の許す限り，当日その場での質問も受け付けます．
+
 ## Demo
 
 ### Phi-4-Multimodalで音声翻訳
