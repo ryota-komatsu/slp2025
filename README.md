@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | [音学シンポジウム2025](https://www.ipsj.or.jp/kenkyukai/event/mus143slp156.html) | 2025年6月13日 | [Link](slp2025-tutorial.pdf) |
 | [6th joint ASA/ASJ meeting](https://acousticalsociety.org/honolulu-2025/) | 2025年12月3日 | [Link](asa2025-lecture.pdf) |
-| [日本音響学会九州支部第3回オンラインセミナー](https://asj-kyushu.acoustics.jp) | 2026年2月27日 18:00-19:30 | 後日公開 |
+| [日本音響学会九州支部第3回オンラインセミナー](https://asj-kyushu.acoustics.jp) | 2026年2月27日 18:00-19:30 | [Link](asj-kyushu-20260227.pdf) |
 
 ## 質問
 
